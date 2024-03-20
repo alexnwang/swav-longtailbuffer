@@ -19,6 +19,7 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
+from torchvision.utils import save_image
 # import apex
 # from apex.parallel.LARC import LARC
 
@@ -208,6 +209,8 @@ def main():
 
     # build the queue
     queue = None
+    queue_x = None
+    queue_age = None
     queue_path = os.path.join(args.dump_path, "queue" + str(args.rank) + ".pth")
     if os.path.isfile(queue_path):
         queue = torch.load(queue_path)["queue"]
@@ -231,9 +234,19 @@ def main():
                 args.queue_length // args.world_size,
                 args.feat_dim,
             ).cuda()
+            queue_x = torch.zeros(
+                len(args.crops_for_assign),
+                args.queue_length // args.world_size,
+                3, args.size_crops[0], args.size_crops[0],
+            ).cuda()
+            queue_age = torch.zeros(
+                len(args.crops_for_assign),
+                args.queue_length // args.world_size,
+            ).cuda()
+            
 
         # train the network
-        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, queue)
+        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, (queue, queue_x, queue_age))
         training_stats.update(scores)
 
         # save checkpoints
@@ -259,13 +272,14 @@ def main():
             torch.save({"queue": queue}, queue_path)
 
 
-def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
+def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
 
     model.train()
     use_the_queue = False
+    queue, queue_x, queue_age = queues
 
     end = time.time()
     for it, inputs in enumerate(train_loader):
@@ -305,6 +319,15 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                     # fill the queue
                     queue[i, bs:] = queue[i, :-bs].clone()
                     queue[i, :bs] = embedding[crop_id * bs: (crop_id + 1) * bs]
+                    
+                    # track the queued images
+                    queue_x[i, bs:] = queue_x[i, :-bs].clone()
+                    queue_x[i, :bs] = inputs[crop_id]
+                    
+                    # track age of elements in queue
+                    queue_age[i, bs:] = queue_age[i, :-bs].clone()
+                    queue_age[i, :bs] = 0
+                    queue_age[i] += 1
 
                 # get assignments
                 q = distributed_sinkhorn(out)[-bs:]
@@ -351,6 +374,10 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                     lr=optimizer.param_groups[0]["lr"],
                 )
             )
+            if not torch.all(queue[i, -1, :] == 0):
+                logger.info(f"saving queue_{epoch}_{it}.png")
+                save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"queue_{epoch}_{it}.png", nrow=8)
+            
     return (epoch, losses.avg), queue
 
 
