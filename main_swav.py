@@ -19,8 +19,8 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
-import apex
-from apex.parallel.LARC import LARC
+# import apex
+# from apex.parallel.LARC import LARC
 
 from src.utils import (
     bool_flag,
@@ -157,6 +157,7 @@ def main():
     if args.sync_bn == "pytorch":
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     elif args.sync_bn == "apex":
+        raise NotImplementedError
         # with apex syncbn we sync bn per group because it speeds up computation
         # compared to global syncbn
         process_group = apex.parallel.create_syncbn_process_group(args.syncbn_process_group_size)
@@ -174,7 +175,7 @@ def main():
         momentum=0.9,
         weight_decay=args.wd,
     )
-    optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
+    # optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
     warmup_lr_schedule = np.linspace(args.start_warmup, args.base_lr, len(train_loader) * args.warmup_epochs)
     iters = np.arange(len(train_loader) * (args.epochs - args.warmup_epochs))
     cosine_lr_schedule = np.array([args.final_lr + 0.5 * (args.base_lr - args.final_lr) * (1 + \
@@ -184,6 +185,7 @@ def main():
 
     # init mixed precision
     if args.use_fp16:
+        raise NotImplementedError
         model, optimizer = apex.amp.initialize(model, optimizer, opt_level="O1")
         logger.info("Initializing mixed precision done.")
 
@@ -200,7 +202,7 @@ def main():
         run_variables=to_restore,
         state_dict=model,
         optimizer=optimizer,
-        amp=apex.amp,
+        #amp=apex.amp,
     )
     start_epoch = to_restore["epoch"]
 
@@ -242,6 +244,7 @@ def main():
                 "optimizer": optimizer.state_dict(),
             }
             if args.use_fp16:
+                raise NotImplementedError
                 save_dict["amp"] = apex.amp.state_dict()
             torch.save(
                 save_dict,
@@ -317,6 +320,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
         # ============ backward and optim step ... ============
         optimizer.zero_grad()
         if args.use_fp16:
+            raise NotImplementedError
             with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
         else:
@@ -344,7 +348,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
                     batch_time=batch_time,
                     data_time=data_time,
                     loss=losses,
-                    lr=optimizer.optim.param_groups[0]["lr"],
+                    lr=optimizer.param_groups[0]["lr"],
                 )
             )
     return (epoch, losses.avg), queue
