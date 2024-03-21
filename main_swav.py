@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import time
+import matplotlib.pyplot as plt
 from logging import getLogger
 
 import numpy as np
@@ -119,6 +120,9 @@ parser.add_argument("--syncbn_process_group_size", type=int, default=8, help="""
 parser.add_argument("--dump_path", type=str, default=".",
                     help="experiment dump path for checkpoints and log")
 parser.add_argument("--seed", type=int, default=31, help="seed")
+
+# new buffering strategies
+parser.add_argument("--buffer_strategy", type=str, default='fifo', help="options: \{fifo,element,prototype\}")
 
 
 def main():
@@ -316,21 +320,21 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                             queue[i],
                             model.module.prototypes.weight.t()
                         ), out))
-                    # fill the queue
-                    queue[i, bs:] = queue[i, :-bs].clone()
-                    queue[i, :bs] = embedding[crop_id * bs: (crop_id + 1) * bs]
-                    
-                    # track the queued images
-                    queue_x[i, bs:] = queue_x[i, :-bs].clone()
-                    queue_x[i, :bs] = inputs[crop_id]
-                    
-                    # track age of elements in queue
-                    queue_age[i, bs:] = queue_age[i, :-bs].clone()
-                    queue_age[i, :bs] = 0
-                    queue_age[i] += 1
-
+        
                 # get assignments
-                q = distributed_sinkhorn(out)[-bs:]
+                q = distributed_sinkhorn(out)        
+                
+                if queue is not None:
+                    if args.buffer_strategy == 'fifo' or use_the_queue == False:
+                        queue, queue_x, queue_age = update_buffer_fifo((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
+                    elif args.buffer_strategy == 'element':
+                        queue, queue_x, queue_age = update_buffer_element((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
+                    elif args.buffer_strategy == 'prototype':
+                        queue, queue_x, queue_age = update_buffer_prototype((queue, queue_x, queue_age), inputs, embedding, out, i, crop_id, bs)
+                    elif args.buffer_strategy == 'code':
+                        queue, queue_x, queue_age = update_buffer_code((queue, queue_x, queue_age), inputs, embedding, q, i, crop_id, bs)
+                
+                q = q[-bs:]
 
             # cluster assignment prediction
             subloss = 0
@@ -380,6 +384,95 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
             
     return (epoch, losses.avg), queue
 
+def update_buffer_fifo(queues, inputs, embedding, i, crop_id, bs):
+    queue, queue_x, queue_age = queues
+    
+    queue[i, bs:] = queue[i, :-bs].clone()
+    queue[i, :bs] = embedding[crop_id * bs: (crop_id + 1) * bs]
+    
+    # track the queued images
+    queue_x[i, bs:] = queue_x[i, :-bs].clone()
+    queue_x[i, :bs] = inputs[crop_id].cuda(non_blocking=True)
+    
+    # track age of elements in queue
+    queue_age[i, bs:] = queue_age[i, :-bs].clone()
+    queue_age[i, :bs] = 0
+    queue_age[i] += 1
+    
+    return queue, queue_x, queue_age
+
+def update_buffer_element(queues, inputs, embedding, i, crop_id, bs):
+    queue, queue_x, queue_age = queues
+    
+    cosine_sim = torch.abs(torch.mm(queue[i], embedding[crop_id * bs: (crop_id + 1) * bs].t())) # B, N
+    w_evict_buffer = cosine_sim.sum(dim=1) # B
+    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
+    
+    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=False)
+    
+    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
+    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
+    queue_age[i, evictions] = 0
+    queue_age[i] += 1
+    
+    return queue, queue_x, queue_age
+
+def update_buffer_prototype(queues, inputs, embedding, p, i, crop_id, bs):
+    queue, queue_x, queue_age = queues
+    
+    emb_cluster_dist = p[-bs:] # N, K
+    buffer_cluster_dist = p[:-bs] # B, K
+    
+    p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
+    w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
+    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
+    
+    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
+    
+    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
+    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
+    queue_age[i, evictions] = 0
+    queue_age[i] += 1
+    
+    return queue, queue_x, queue_age
+
+def update_buffer_code(queues, inputs, embedding, q, i, crop_id, bs):
+    queue, queue_x, queue_age = queues
+    
+    emb_cluster_dist = q[-bs:] # N, K
+    buffer_cluster_dist = q[:-bs] # B, K
+    
+    p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
+    w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
+    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
+    
+    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
+    
+    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
+    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
+    queue_age[i, evictions] = 0
+    queue_age[i] += 1
+    
+    return queue, queue_x, queue_age
+
+def plot_2d_heatmap(p, f):
+    N = p.shape[0]
+    probabilities = p.cpu().numpy()
+
+    # Reshape probabilities to 2D array
+    probabilities = probabilities.reshape(8, -1)
+
+    # Plotting heatmap
+    plt.figure(figsize=(8, 6))
+    plt.imshow(probabilities, cmap='viridis', aspect='auto')
+    plt.colorbar()
+    plt.title('Probability Heatmap')
+    plt.xlabel('Index')
+    plt.ylabel('Probability')
+    plt.tight_layout()
+
+    # Save plot to file
+    plt.savefig(f)
 
 @torch.no_grad()
 def distributed_sinkhorn(out):
