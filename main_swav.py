@@ -385,8 +385,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 )
             )
             if not torch.all(queue[i, -1, :] == 0):
-                logger.info(f"{args.dump_path}/saving queue_{epoch}_{it}.png")
-                save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"queue_{epoch}_{it}.png", nrow=8)
+                logger.info(f"saving queue_{epoch}_{it}.png")
+                save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"{args.dump_path}/queue_{epoch}_{it}.png", nrow=8)
             if w_evict_buffer is not None:
                 plot_2d_heatmap(w_evict_buffer, f"{args.dump_path}/cosine_sim_{epoch}_{it}.png")
             
