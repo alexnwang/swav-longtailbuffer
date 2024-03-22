@@ -38,8 +38,8 @@ import src.resnet50 as resnet_models
 
 logger = getLogger()
 loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
-for logger in loggers:
-    logger.setLevel(logging.INFO)
+for logger_ in loggers:
+    logger_.setLevel(logging.INFO)
 
 parser = argparse.ArgumentParser(description="Implementation of SwAV")
 
@@ -194,10 +194,9 @@ def main():
     logger.info("Building optimizer done.")
 
     # init mixed precision
-    if args.use_fp16:
-        raise NotImplementedError
-        model, optimizer = apex.amp.initialize(model, optimizer, opt_level="O1")
-        logger.info("Initializing mixed precision done.")
+    # if args.use_fp16:
+    #     model, optimizer = apex.amp.initialize(model, optimizer, opt_level="O1")
+    #     logger.info("Initializing mixed precision done.")
 
     # wrap model
     model = nn.parallel.DistributedDataParallel(
@@ -220,6 +219,7 @@ def main():
     queue = None
     queue_x = None
     queue_age = None
+    queue_target = None
     # queue_path = os.path.join(args.dump_path, "queue" + str(args.rank) + ".pth")
     # if os.path.isfile(queue_path):
     #     queue = torch.load(queue_path)["queue"]
@@ -252,31 +252,35 @@ def main():
                 len(args.crops_for_assign),
                 args.queue_length // args.world_size,
             ).cuda()
+            queue_target = torch.zeros(
+                args.queue_length // args.world_size,
+                dtype=torch.long,
+            ).cuda()
             
 
         # train the network
-        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, (queue, queue_x, queue_age))
+        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, (queue, queue_x, queue_age, queue_target))
         training_stats.update(scores)
 
         # save checkpoints
-        if args.rank == 0:
-            save_dict = {
-                "epoch": epoch + 1,
-                "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            if args.use_fp16:
-                raise NotImplementedError
-                save_dict["amp"] = apex.amp.state_dict()
+        # if args.rank == 0:
+        #     save_dict = {
+        #         "epoch": epoch + 1,
+        #         "state_dict": model.state_dict(),
+        #         "optimizer": optimizer.state_dict(),
+        #     }
+            # if args.use_fp16:
+            #     raise NotImplementedError
+                # save_dict["amp"] = apex.amp.state_dict()
             # torch.save(
             #     save_dict,
             #     os.path.join(args.dump_path, "checkpoint.pth.tar"),
             # )
-            if epoch % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
-                shutil.copyfile(
-                    os.path.join(args.dump_path, "checkpoint.pth.tar"),
-                    os.path.join(args.dump_checkpoints, "ckp-" + str(epoch) + ".pth"),
-                )
+            # if epoch % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
+            #     shutil.copyfile(
+            #         os.path.join(args.dump_path, "checkpoint.pth.tar"),
+            #         os.path.join(args.dump_checkpoints, "ckp-" + str(epoch) + ".pth"),
+            #     )
         # if queue is not None:
         #     torch.save({"queue": queue}, queue_path)
 
@@ -288,10 +292,10 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
 
     model.train()
     use_the_queue = False
-    queue, queue_x, queue_age = queues
+    queue, queue_x, queue_age, queue_target = queues
 
     end = time.time()
-    for it, inputs in enumerate(train_loader):
+    for it, (inputs, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -306,52 +310,52 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
             w = nn.functional.normalize(w, dim=1, p=2)
             model.module.prototypes.weight.copy_(w)
 
-        # ============ multi-res forward passes ... ============
-        with (torch.no_grad() if args.no_grad else torch.enable_grad()): 
-            embedding, output = model(inputs)
-        embedding = embedding.detach()
-        bs = inputs[0].size(0)
-
-        # ============ swav loss ... ============
-        loss = 0
-        for i, crop_id in enumerate(args.crops_for_assign):
-            with torch.no_grad():
-                out = output[bs * crop_id: bs * (crop_id + 1)].detach()
-
-                # time to use the queue
-                if queue is not None:
-                    if use_the_queue or not torch.all(queue[i, -1, :] == 0):
-                        if use_the_queue is False:
-                            logger.info("Queue is now full, begin using queue.")
-                        use_the_queue = True
-                        out = torch.cat((torch.mm(
-                            queue[i],
-                            model.module.prototypes.weight.t()
-                        ), out))
+        with torch.amp.autocast(enabled=args.use_fp16, device_type='cuda'):
         
-                # get assignments
-                q = distributed_sinkhorn(out)        
-                
-                if queue is not None:
-                    if args.buffer_strategy == 'fifo' or use_the_queue == False:
-                        queue, queue_x, queue_age = update_buffer_fifo((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
-                        w_evict_buffer = None
-                    elif args.buffer_strategy == 'element':
-                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_element((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
-                    elif args.buffer_strategy == 'prototype':
-                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_prototype((queue, queue_x, queue_age), inputs, embedding, out, i, crop_id, bs)
-                    elif args.buffer_strategy == 'code':
-                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_code((queue, queue_x, queue_age), inputs, embedding, q, i, crop_id, bs)
-                
-                q = q[-bs:]
+            # ============ multi-res forward passes ... ============
+            with (torch.no_grad() if args.no_grad else torch.enable_grad()): 
+                embedding, output = model(inputs)
+            embedding = embedding.detach()
+            bs = inputs[0].size(0)
 
-            # cluster assignment prediction
-            subloss = 0
-            for v in np.delete(np.arange(np.sum(args.nmb_crops)), crop_id):
-                x = output[bs * v: bs * (v + 1)] / args.temperature
-                subloss -= torch.mean(torch.sum(q * F.log_softmax(x, dim=1), dim=1))
-            loss += subloss / (np.sum(args.nmb_crops) - 1)
-        loss /= len(args.crops_for_assign)
+            # ============ swav loss ... ============
+            loss = 0
+            for i, crop_id in enumerate(args.crops_for_assign):
+                with torch.no_grad():
+                    out = output[bs * crop_id: bs * (crop_id + 1)].detach()
+
+                    # time to use the queue
+                    if queue is not None:
+                        if use_the_queue or not torch.all(queue[i, -1, :] == 0):
+                            if use_the_queue is False:
+                                logger.info("Queue is now full, begin using queue.")
+                            use_the_queue = True
+                            out = torch.cat((torch.mm(
+                                queue[i],
+                                model.module.prototypes.weight.t()
+                            ), out))
+            
+                    # get assignments
+                    q = distributed_sinkhorn(out)        
+                    
+                    if queue is not None:
+                        if use_the_queue == False or args.buffer_strategy == 'fifo':
+                            queue, queue_x, queue_age, queue_target, w_evict_buffer = update_buffer((queue, queue_x, queue_age, queue_target),
+                                                                                    inputs, target, embedding, bs, len(args.crops_for_assign), 'fifo')
+                        else:
+                            queue, queue_x, queue_age, queue_target, w_evict_buffer = update_buffer((queue, queue_x, queue_age, queue_target),
+                                                                                    inputs, target, embedding, bs, len(args.crops_for_assign), args.buffer_strategy,
+                                                                                    out, q, model.module.prototypes.weight)
+                    
+                    q = q[-bs:]
+
+                # cluster assignment prediction
+                subloss = 0
+                for v in np.delete(np.arange(np.sum(args.nmb_crops)), crop_id):
+                    x = output[bs * v: bs * (v + 1)] / args.temperature
+                    subloss -= torch.mean(torch.sum(q * F.log_softmax(x, dim=1), dim=1))
+                loss += subloss / (np.sum(args.nmb_crops) - 1)
+            loss /= len(args.crops_for_assign)
 
         # ============ backward and optim step ... ============
         if not args.no_grad:
@@ -393,76 +397,69 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"{args.dump_path}/queue_{epoch}_{it}.png", nrow=8)
             if w_evict_buffer is not None:
                 plot_2d_heatmap(w_evict_buffer, f"{args.dump_path}/cosine_sim_{epoch}_{it}.png")
+            plot_class_distribution(queue_target, f"{args.dump_path}/class_distribution_{epoch}_{it}.png")
             
     return (epoch, losses.avg), queue
 
-def update_buffer_fifo(queues, inputs, embedding, i, crop_id, bs):
-    queue, queue_x, queue_age = queues
-    
-    queue[i, bs:] = queue[i, :-bs].clone()
-    queue[i, :bs] = embedding[crop_id * bs: (crop_id + 1) * bs]
-    
-    # track the queued images
-    queue_x[i, bs:] = queue_x[i, :-bs].clone()
-    queue_x[i, :bs] = inputs[crop_id].cuda(non_blocking=True)
-    
-    # track age of elements in queue
-    queue_age[i, bs:] = queue_age[i, :-bs].clone()
-    queue_age[i, :bs] = 0
-    queue_age[i] += 1
-    
-    return queue, queue_x, queue_age
+def update_buffer(queues, x, y, z, N, num_crops_for_assign, mode, p=None, q=None, c=None):
+    """update buffer
 
-def update_buffer_element(queues, inputs, embedding, i, crop_id, bs):
-    queue, queue_x, queue_age = queues
+    Args:
+        queues (tuple): queues that are to be updated
+        x (list[torch.Tensor]): input images of shape [N, C, H, W]
+        y (torch.Tensor): target labels of shape [N]
+        z (torch.Tensor): encoder outputs of shape [N*nmb_crops, D]
+        p (torch.Tensor): encoder outputs matmul'd with prototypes [N*nmb_crops+B, K]
+        q (torch.Tensor): sinkhorn cluster assignments [N*nmb_crops+B, K]
+        N (int): batch size
+        num_crops_for_assign (int): number of crops for assign, usually 2
+        mode (str): buffer update mode (fifo, element, prototype, code)
+    """
+    assert mode in ['fifo', 'element', 'prototype', 'code']
     
-    cosine_sim = torch.abs(torch.mm(queue[i], embedding[crop_id * bs: (crop_id + 1) * bs].t())) # B, N
-    w_evict_buffer = cosine_sim.sum(dim=1) # B
+    queue, queue_x, queue_age, queue_target = queues
+    D = z.shape[-1]
+    B = queue.shape[1]
+    device = z.device
     
-    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=False)
-    
-    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
-    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
-    queue_age[i, evictions] = 0
-    queue_age[i] += 1
-    
-    return queue, queue_x, queue_age, w_evict_buffer
-
-def update_buffer_prototype(queues, inputs, embedding, p, i, crop_id, bs):
-    queue, queue_x, queue_age = queues
-    
-    emb_cluster_dist = p[-bs:] # N, K
-    buffer_cluster_dist = p[:-bs] # B, K
-    
-    p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
-    w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
-    
-    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
-    
-    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
-    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
-    queue_age[i, evictions] = 0
-    queue_age[i] += 1
-    
-    return queue, queue_x, queue_age, w_evict_buffer
-
-def update_buffer_code(queues, inputs, embedding, q, i, crop_id, bs):
-    queue, queue_x, queue_age = queues
-    
-    emb_cluster_dist = q[-bs:] # N, K
-    buffer_cluster_dist = q[:-bs] # B, K
-    
-    p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
-    w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
-    
-    evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
-    
-    queue[i, evictions] = embedding[crop_id * bs: (crop_id + 1) * bs]
-    queue_x[i, evictions] = inputs[crop_id].cuda(non_blocking=True)
-    queue_age[i, evictions] = 0
-    queue_age[i] += 1
-    
-    return queue, queue_x, queue_age, w_evict_buffer
+    if mode == 'fifo':
+        queue[:, N:] = queue[:, :-N].clone() # shift
+        queue[:, :N] = z[:N*num_crops_for_assign].reshape(num_crops_for_assign, N, -1) # update
+        queue_x[:, N:] = queue_x[:, :-N].clone() # shift
+        queue_x[:, :N] = torch.stack(x[:num_crops_for_assign], dim=0).cuda(non_blocking=True).reshape(num_crops_for_assign, N, *x[0].shape[-3:]) # update
+        queue_age += 1 # increment
+        queue_age[:, N:] = queue_age[:, :-N].clone() # shift
+        queue_age[:, :N] = 0 # reset
+        queue_target[N:] = queue_target[:-N].clone() # shift
+        queue_target[:N] = y # update
+        return queue, queue_x, queue_age, queue_target, None
+    else:
+        bz = torch.cat((queue, z[:N*num_crops_for_assign].reshape(num_crops_for_assign, N, -1)), dim=1) # nmb_crops_for_assign, N + B, D
+        x_ = torch.stack(x[:num_crops_for_assign], dim=0).cuda(non_blocking=True).reshape(num_crops_for_assign, N, *x[0].shape[-3:])
+        qxx = torch.cat((queue_x, x_), dim=1) # nmb_crops_for_assign, N + B, 3, H, W
+        age_ = torch.cat((queue_age + 1., torch.zeros(num_crops_for_assign, N, dtype=torch.long, device=device)), dim=1) # nmb_crops_for_assign, N + B
+        qyy = torch.cat((queue_target, y.cuda(non_blocking=True)), dim=0) # N + B
+        
+        if mode == 'element':
+            cosine_sim = torch.bmm(bz, bz.permute(0, 2, 1)) + 1. - torch.eye(N+B, device=device) * 2 # nmb_crops_for_assign, N + B, N + B
+            w_evict_bz = cosine_sim.sum(dim=2).mean(0) # N + B
+            evictions = torch.multinomial(w_evict_bz + 1e-7, N, replacement=False)
+        if mode == 'prototype':
+            K = c.shape[0]
+            c_norm = F.normalize(c, p=2, dim=1) # K, D
+            cluster_sim = torch.mm(c_norm, c_norm.t()) + 1. - torch.eye(K, device=device) * 2 # K, K
+            w_evict_cluster = cluster_sim.sum(dim=1) / cluster_sim.sum() # K
+            w_evict_bz = ((p + 1.) * w_evict_cluster[None]).sum(dim=1) # N + B
+            evictions = torch.multinomial(w_evict_bz + 1e-7, N, replacement=False)
+            
+        unevicted_indices = torch.ones(N + queue.shape[1], dtype=torch.bool, device=device)
+        unevicted_indices[evictions] = False
+        
+        queue[:, :] = bz[:, unevicted_indices] # update
+        queue_x[:, :] = qxx[:, unevicted_indices] # update
+        queue_age[:, :] = age_[:, unevicted_indices] # update
+        queue_target[:] = qyy[unevicted_indices] # update  
+        return queue, queue_x, queue_age, queue_target, w_evict_bz
 
 def plot_2d_heatmap(p, f):
     N = p.shape[0]
@@ -482,6 +479,24 @@ def plot_2d_heatmap(p, f):
 
     # Save plot to file
     plt.savefig(f)
+
+def plot_class_distribution(class_labels_tensor, filepath=None):
+    # Convert tensor to numpy array for plotting
+    class_labels_np = class_labels_tensor.cpu().numpy()
+
+    # Plot the histogram
+    plt.figure(figsize=(8, 6))
+    plt.hist(class_labels_np, bins=range(int(class_labels_tensor.max()) + 2), alpha=0.7, color='skyblue', edgecolor='black')
+    plt.title('Distribution of Class Labels')
+    plt.xlabel('Class Labels')
+    plt.ylabel('Frequency')
+    plt.xticks(range(int(class_labels_tensor.max()) + 1))
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    if filepath:
+        plt.savefig(filepath)  # Save the plot to the specified file
+    else:
+        plt.show()
 
 @torch.no_grad()
 def distributed_sinkhorn(out):
