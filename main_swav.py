@@ -317,6 +317,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 # time to use the queue
                 if queue is not None:
                     if use_the_queue or not torch.all(queue[i, -1, :] == 0):
+                        if use_the_queue is False:
+                            log.info("Queue is now full, begin using queue.")
                         use_the_queue = True
                         out = torch.cat((torch.mm(
                             queue[i],
