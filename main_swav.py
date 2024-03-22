@@ -123,6 +123,7 @@ parser.add_argument("--seed", type=int, default=31, help="seed")
 
 # new buffering strategies
 parser.add_argument("--buffer_strategy", type=str, default='fifo', help="options: \{fifo,element,prototype,code\}")
+parser.add_argument("--no_grad", action='store_true', help="whether to use gradients")
 
 
 def main():
@@ -302,7 +303,8 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
             model.module.prototypes.weight.copy_(w)
 
         # ============ multi-res forward passes ... ============
-        embedding, output = model(inputs)
+        with (torch.no_grad() if args.no_grad else torch.enable_grad()): 
+            embedding, output = model(inputs)
         embedding = embedding.detach()
         bs = inputs[0].size(0)
 
@@ -345,19 +347,20 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
         loss /= len(args.crops_for_assign)
 
         # ============ backward and optim step ... ============
-        optimizer.zero_grad()
-        if args.use_fp16:
-            raise NotImplementedError
-            with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss.backward()
-        # cancel gradients for the prototypes
-        if iteration < args.freeze_prototypes_niters:
-            for name, p in model.named_parameters():
-                if "prototypes" in name:
-                    p.grad = None
-        optimizer.step()
+        if not args.no_grad:
+            optimizer.zero_grad()
+            if args.use_fp16:
+                raise NotImplementedError
+                with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+            # cancel gradients for the prototypes
+            if iteration < args.freeze_prototypes_niters:
+                for name, p in model.named_parameters():
+                    if "prototypes" in name:
+                        p.grad = None
+            optimizer.step()
 
         # ============ misc ... ============
         losses.update(loss.item(), inputs[0].size(0))
