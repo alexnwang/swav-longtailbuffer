@@ -220,9 +220,9 @@ def main():
     queue = None
     queue_x = None
     queue_age = None
-    queue_path = os.path.join(args.dump_path, "queue" + str(args.rank) + ".pth")
-    if os.path.isfile(queue_path):
-        queue = torch.load(queue_path)["queue"]
+    # queue_path = os.path.join(args.dump_path, "queue" + str(args.rank) + ".pth")
+    # if os.path.isfile(queue_path):
+    #     queue = torch.load(queue_path)["queue"]
     # the queue needs to be divisible by the batch size
     args.queue_length -= args.queue_length % (args.batch_size * args.world_size)
 
@@ -277,8 +277,8 @@ def main():
                     os.path.join(args.dump_path, "checkpoint.pth.tar"),
                     os.path.join(args.dump_checkpoints, "ckp-" + str(epoch) + ".pth"),
                 )
-        if queue is not None:
-            torch.save({"queue": queue}, queue_path)
+        # if queue is not None:
+        #     torch.save({"queue": queue}, queue_path)
 
 
 def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
