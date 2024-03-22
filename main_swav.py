@@ -329,12 +329,13 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 if queue is not None:
                     if args.buffer_strategy == 'fifo' or use_the_queue == False:
                         queue, queue_x, queue_age = update_buffer_fifo((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
+                        w_evict_buffer = None
                     elif args.buffer_strategy == 'element':
-                        queue, queue_x, queue_age = update_buffer_element((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
+                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_element((queue, queue_x, queue_age), inputs, embedding, i, crop_id, bs)
                     elif args.buffer_strategy == 'prototype':
-                        queue, queue_x, queue_age = update_buffer_prototype((queue, queue_x, queue_age), inputs, embedding, out, i, crop_id, bs)
+                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_prototype((queue, queue_x, queue_age), inputs, embedding, out, i, crop_id, bs)
                     elif args.buffer_strategy == 'code':
-                        queue, queue_x, queue_age = update_buffer_code((queue, queue_x, queue_age), inputs, embedding, q, i, crop_id, bs)
+                        queue, queue_x, queue_age, w_evict_buffer = update_buffer_code((queue, queue_x, queue_age), inputs, embedding, q, i, crop_id, bs)
                 
                 q = q[-bs:]
 
@@ -382,8 +383,10 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 )
             )
             if not torch.all(queue[i, -1, :] == 0):
-                logger.info(f"saving queue_{epoch}_{it}.png")
+                logger.info(f"{args.dump_path}/saving queue_{epoch}_{it}.png")
                 save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"queue_{epoch}_{it}.png", nrow=8)
+            if w_evict_buffer is not None:
+                plot_2d_heatmap(w_evict_buffer, f"{args.dump_path}/cosine_sim_{epoch}_{it}.png")
             
     return (epoch, losses.avg), queue
 
@@ -409,7 +412,6 @@ def update_buffer_element(queues, inputs, embedding, i, crop_id, bs):
     
     cosine_sim = torch.abs(torch.mm(queue[i], embedding[crop_id * bs: (crop_id + 1) * bs].t())) # B, N
     w_evict_buffer = cosine_sim.sum(dim=1) # B
-    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
     
     evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=False)
     
@@ -418,7 +420,7 @@ def update_buffer_element(queues, inputs, embedding, i, crop_id, bs):
     queue_age[i, evictions] = 0
     queue_age[i] += 1
     
-    return queue, queue_x, queue_age
+    return queue, queue_x, queue_age, w_evict_buffer
 
 def update_buffer_prototype(queues, inputs, embedding, p, i, crop_id, bs):
     queue, queue_x, queue_age = queues
@@ -428,7 +430,6 @@ def update_buffer_prototype(queues, inputs, embedding, p, i, crop_id, bs):
     
     p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
     w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
-    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
     
     evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
     
@@ -437,7 +438,7 @@ def update_buffer_prototype(queues, inputs, embedding, p, i, crop_id, bs):
     queue_age[i, evictions] = 0
     queue_age[i] += 1
     
-    return queue, queue_x, queue_age
+    return queue, queue_x, queue_age, w_evict_buffer
 
 def update_buffer_code(queues, inputs, embedding, q, i, crop_id, bs):
     queue, queue_x, queue_age = queues
@@ -447,7 +448,6 @@ def update_buffer_code(queues, inputs, embedding, q, i, crop_id, bs):
     
     p_evict_cluster = torch.sum(emb_cluster_dist, dim=0) / torch.sum(emb_cluster_dist) # K
     w_evict_buffer = buffer_cluster_dist * p_evict_cluster # B
-    plot_2d_heatmap(w_evict_buffer, "cosine_sim.png")
     
     evictions = torch.multinomial(w_evict_buffer + 1e-7, bs, replacement=True)
     
@@ -456,7 +456,7 @@ def update_buffer_code(queues, inputs, embedding, q, i, crop_id, bs):
     queue_age[i, evictions] = 0
     queue_age[i] += 1
     
-    return queue, queue_x, queue_age
+    return queue, queue_x, queue_age, w_evict_buffer
 
 def plot_2d_heatmap(p, f):
     N = p.shape[0]
