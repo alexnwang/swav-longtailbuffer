@@ -264,10 +264,10 @@ def main():
             if args.use_fp16:
                 raise NotImplementedError
                 save_dict["amp"] = apex.amp.state_dict()
-            torch.save(
-                save_dict,
-                os.path.join(args.dump_path, "checkpoint.pth.tar"),
-            )
+            # torch.save(
+            #     save_dict,
+            #     os.path.join(args.dump_path, "checkpoint.pth.tar"),
+            # )
             if epoch % args.checkpoint_freq == 0 or epoch == args.epochs - 1:
                 shutil.copyfile(
                     os.path.join(args.dump_path, "checkpoint.pth.tar"),
@@ -318,7 +318,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                 if queue is not None:
                     if use_the_queue or not torch.all(queue[i, -1, :] == 0):
                         if use_the_queue is False:
-                            log.info("Queue is now full, begin using queue.")
+                            logger.info("Queue is now full, begin using queue.")
                         use_the_queue = True
                         out = torch.cat((torch.mm(
                             queue[i],
