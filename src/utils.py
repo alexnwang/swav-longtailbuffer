@@ -127,6 +127,7 @@ def restart_from_checkpoint(ckp_paths, run_variables=None, **kwargs):
     checkpoint = torch.load(
         ckp_path, map_location="cuda:" + str(torch.distributed.get_rank() % torch.cuda.device_count())
     )
+    checkpoint = {"state_dict": checkpoint}
 
     # key is what to look for in the checkpoint file
     # value is the object to load
