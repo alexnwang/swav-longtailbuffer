@@ -11,6 +11,7 @@ import shutil
 import time
 import matplotlib.pyplot as plt
 from logging import getLogger
+import logging
 
 import numpy as np
 import torch
@@ -36,6 +37,9 @@ from src.multicropdataset import MultiCropDataset
 import src.resnet50 as resnet_models
 
 logger = getLogger()
+loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+for logger in loggers:
+    logger.setLevel(logging.INFO)
 
 parser = argparse.ArgumentParser(description="Implementation of SwAV")
 
