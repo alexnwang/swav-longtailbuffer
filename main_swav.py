@@ -122,7 +122,7 @@ parser.add_argument("--dump_path", type=str, default=".",
 parser.add_argument("--seed", type=int, default=31, help="seed")
 
 # new buffering strategies
-parser.add_argument("--buffer_strategy", type=str, default='fifo', help="options: \{fifo,element,prototype\}")
+parser.add_argument("--buffer_strategy", type=str, default='fifo', help="options: \{fifo,element,prototype,code\}")
 
 
 def main():
@@ -140,7 +140,7 @@ def main():
         args.min_scale_crops,
         args.max_scale_crops,
     )
-    sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         sampler=sampler,
