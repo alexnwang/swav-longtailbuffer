@@ -249,7 +249,6 @@ def main():
                 3, args.size_crops[0], args.size_crops[0],
             ).cuda()
             queue_age = torch.zeros(
-                len(args.crops_for_assign),
                 args.queue_length // args.world_size,
             ).cuda()
             queue_target = torch.zeros(
@@ -392,12 +391,15 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queues):
                     lr=optimizer.param_groups[0]["lr"],
                 )
             )
-            if not torch.all(queue[i, -1, :] == 0):
-                logger.info(f"saving queue_{epoch}_{it}.png")
-                save_image(queue_x.permute(1, 0, 2, 3, 4).flatten(0, 1)[:64], f"{args.dump_path}/queue_{epoch}_{it}.png", nrow=8)
-            if w_evict_buffer is not None:
-                plot_2d_heatmap(w_evict_buffer, f"{args.dump_path}/cosine_sim_{epoch}_{it}.png")
-            plot_class_distribution(queue_target, f"{args.dump_path}/class_distribution_{epoch}_{it}.png")
+            if queue is not None:
+                if not torch.all(queue[i, -1, :] == 0):
+                    logger.info(f"saving queue_{epoch}_{it}.png")
+                    oldest_indices = torch.topk(queue_age, 64, largest=True).indices
+                    save_im = queue_x[0, oldest_indices] * torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1) + torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1) # 64, C, H, W
+                    save_image(save_im, f"{args.dump_path}/queue_{epoch}_{it}.png", nrow=8)
+                if w_evict_buffer is not None:
+                    plot_2d_heatmap(w_evict_buffer, f"{args.dump_path}/cosine_sim_{epoch}_{it}.png")
+                plot_class_distribution(queue_target, f"{args.dump_path}/class_distribution_{epoch}_{it}.png")
             
     return (epoch, losses.avg), queue
 
@@ -428,8 +430,8 @@ def update_buffer(queues, x, y, z, N, num_crops_for_assign, mode, p=None, q=None
         queue_x[:, N:] = queue_x[:, :-N].clone() # shift
         queue_x[:, :N] = torch.stack(x[:num_crops_for_assign], dim=0).cuda(non_blocking=True).reshape(num_crops_for_assign, N, *x[0].shape[-3:]) # update
         queue_age += 1 # increment
-        queue_age[:, N:] = queue_age[:, :-N].clone() # shift
-        queue_age[:, :N] = 0 # reset
+        queue_age[N:] = queue_age[:-N].clone() # shift
+        queue_age[:N] = 0 # reset
         queue_target[N:] = queue_target[:-N].clone() # shift
         queue_target[:N] = y # update
         return queue, queue_x, queue_age, queue_target, None
@@ -437,7 +439,7 @@ def update_buffer(queues, x, y, z, N, num_crops_for_assign, mode, p=None, q=None
         bz = torch.cat((queue, z[:N*num_crops_for_assign].reshape(num_crops_for_assign, N, -1)), dim=1) # nmb_crops_for_assign, N + B, D
         x_ = torch.stack(x[:num_crops_for_assign], dim=0).cuda(non_blocking=True).reshape(num_crops_for_assign, N, *x[0].shape[-3:])
         qxx = torch.cat((queue_x, x_), dim=1) # nmb_crops_for_assign, N + B, 3, H, W
-        age_ = torch.cat((queue_age + 1., torch.zeros(num_crops_for_assign, N, dtype=torch.long, device=device)), dim=1) # nmb_crops_for_assign, N + B
+        age_ = torch.cat((queue_age + 1., torch.zeros(N, dtype=torch.long, device=device)), dim=0) # nmb_crops_for_assign, N + B
         qyy = torch.cat((queue_target, y.cuda(non_blocking=True)), dim=0) # N + B
         
         if mode == 'element':
@@ -457,7 +459,7 @@ def update_buffer(queues, x, y, z, N, num_crops_for_assign, mode, p=None, q=None
         
         queue[:, :] = bz[:, unevicted_indices] # update
         queue_x[:, :] = qxx[:, unevicted_indices] # update
-        queue_age[:, :] = age_[:, unevicted_indices] # update
+        queue_age[:] = age_[unevicted_indices] # update
         queue_target[:] = qyy[unevicted_indices] # update  
         return queue, queue_x, queue_age, queue_target, w_evict_bz
 
